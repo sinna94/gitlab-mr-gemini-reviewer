@@ -21,7 +21,7 @@
 
 ```yaml
 image:
-  name: ghcr.io/<github-username>/gitlab-mr-gemini-reviewer:latest
+  name: ghcr.io/sinna94/gitlab-mr-gemini-reviewer:latest
   entrypoint: [""]
 
 stages:
@@ -30,7 +30,7 @@ stages:
 review-mr:
   stage: review
   script:
-    - python reviewer.py prompt.txt
+    - python /app/reviewer.py prompt.txt
   only:
     - merge_requests
   variables:
@@ -38,9 +38,9 @@ review-mr:
     GEMINI_API_KEY: "$GEMINI_API_KEY"  # 환경변수에 Gemini API Key 등록 필요
 ```
 
-- `<github-username>`을 본인 GitHub 계정명으로 변경하세요.
 - `GEMINI_API_KEY`는 GitLab CI/CD 환경변수에 등록해야 합니다.
 - MR이 생성/업데이트될 때마다 자동으로 코드리뷰가 코멘트로 등록됩니다.
+- 각 프로젝트 루트에 `prompt.txt` 파일이 있어야 합니다.
 
 ### 3. 환경변수 설명
 - `GITLAB_TOKEN`: GitLab API 인증 토큰 (CI에서는 `$CI_JOB_TOKEN` 사용 가능)

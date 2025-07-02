@@ -2,6 +2,7 @@ import os
 import subprocess
 import requests
 import sys
+import time
 
 gitlab_token = os.environ.get('GITLAB_TOKEN')
 gitlab_project_id = os.environ.get('CI_PROJECT_ID')
@@ -12,10 +13,30 @@ gemini_api_key = os.environ.get('GEMINI_API_KEY')
 
 def get_mr_changes():
     url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/changes"
-    headers = {"PRIVATE-TOKEN": gitlab_token}
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()['changes']
+    
+    # CI_JOB_TOKEN을 사용할 때는 JOB-TOKEN 헤더 사용
+    if gitlab_token == os.environ.get('CI_JOB_TOKEN'):
+        headers = {"JOB-TOKEN": gitlab_token}
+    else:
+        headers = {"PRIVATE-TOKEN": gitlab_token}
+    
+    # 재시도 로직 (최대 3번, 각 시도 사이에 5초 대기)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.get(url, headers=headers)
+            resp.raise_for_status()
+            return resp.json()['changes']
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404 and attempt < max_retries - 1:
+                print(f"404 에러 발생, {5}초 후 재시도... (시도 {attempt + 1}/{max_retries})")
+                time.sleep(5)
+                continue
+            else:
+                raise
+    
+    # 모든 재시도 실패시 빈 리스트 반환
+    return []
 
 
 def read_prompt(prompt_path):
@@ -37,7 +58,13 @@ def review_with_gemini(diff_text, prompt_text):
 
 def post_mr_comment(body):
     url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/notes"
-    headers = {"PRIVATE-TOKEN": gitlab_token}
+    
+    # CI_JOB_TOKEN을 사용할 때는 JOB-TOKEN 헤더 사용
+    if gitlab_token == os.environ.get('CI_JOB_TOKEN'):
+        headers = {"JOB-TOKEN": gitlab_token}
+    else:
+        headers = {"PRIVATE-TOKEN": gitlab_token}
+    
     data = {"body": body}
     resp = requests.post(url, headers=headers, data=data)
     resp.raise_for_status()
