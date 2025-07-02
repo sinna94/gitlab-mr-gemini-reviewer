@@ -34,7 +34,7 @@ review-mr:
   only:
     - merge_requests
   variables:
-    GITLAB_TOKEN: "$CI_JOB_TOKEN"
+    GITLAB_TOKEN: "$GITLAB_PAT"  # GitLab Personal Access Token (환경변수에 등록 필요)
     GEMINI_API_KEY: "$GEMINI_API_KEY"  # 환경변수에 Gemini API Key 등록 필요
 ```
 
@@ -42,9 +42,15 @@ review-mr:
 - MR이 생성/업데이트될 때마다 자동으로 코드리뷰가 코멘트로 등록됩니다.
 - 각 프로젝트 루트에 `prompt.txt` 파일이 있어야 합니다.
 
-### 3. 환경변수 설명
-- `GITLAB_TOKEN`: GitLab API 인증 토큰 (CI에서는 `$CI_JOB_TOKEN` 사용 가능)
+### 3. 환경변수 설정
+- `GITLAB_PAT`: GitLab Personal Access Token (`api`, `read_repository` 권한 필요)
 - `GEMINI_API_KEY`: Gemini CLI API Key
+
+#### GitLab Personal Access Token 생성 방법:
+1. GitLab → Settings → Access Tokens
+2. Token name: `mr-reviewer` (원하는 이름)
+3. Scopes: `api`, `read_repository` 선택
+4. 생성된 토큰을 GitLab CI/CD 환경변수 `GITLAB_PAT`에 등록
 
 ---
 
