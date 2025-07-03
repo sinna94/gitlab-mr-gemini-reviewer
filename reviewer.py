@@ -31,31 +31,48 @@ def review_with_gemini_cli(diff_text, prompt_text):
     full_prompt = f"{prompt_text}\n\n{diff_text}"
 
     try:
-        # 임시 파일에 프롬프트 저장
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as temp_file:
-            temp_file.write(full_prompt)
-            temp_file_path = temp_file.name
+        # Gemini CLI는 GEMINI_API_KEY 환경변수를 사용
+        env = os.environ.copy()
+        env['GEMINI_API_KEY'] = gemini_api_key
 
-        # Gemini CLI 공식 명령어 구조 사용
-        cmd = ['gemini', 'generate', '--api-key', gemini_api_key, '--prompt', full_prompt]
+        # 올바른 Gemini CLI 명령어 구조
+        cmd = ['gemini', '--prompt', full_prompt]
 
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             encoding='utf-8',
-            timeout=120
+            timeout=120,
+            env=env
         )
-
-        # 임시 파일 정리
-        os.unlink(temp_file_path)
 
         if result.returncode == 0:
             return result.stdout.strip()
         else:
             error_msg = result.stderr.strip() if result.stderr else "알 수 없는 오류"
             print(f"Gemini CLI 오류 (종료 코드 {result.returncode}): {error_msg}")
-            return f"❌ Gemini CLI 실행 실패: {error_msg}"
+
+            # 표준 입력으로 프롬프트 전달 시도
+            try:
+                print("표준 입력 방식으로 재시도 중...")
+                cmd_stdin = ['gemini']
+                result_stdin = subprocess.run(
+                    cmd_stdin,
+                    input=full_prompt,
+                    capture_output=True,
+                    text=True,
+                    encoding='utf-8',
+                    timeout=120,
+                    env=env
+                )
+
+                if result_stdin.returncode == 0:
+                    return result_stdin.stdout.strip()
+                else:
+                    return f"❌ Gemini CLI 실행 실패: {error_msg}"
+            except Exception:
+                return f"❌ Gemini CLI 실행 실패: {error_msg}"
 
     except subprocess.TimeoutExpired:
         print("Gemini CLI 실행 시간 초과")
@@ -66,13 +83,6 @@ def review_with_gemini_cli(diff_text, prompt_text):
     except Exception as e:
         print(f"Gemini CLI 실행 중 예상치 못한 오류: {e}")
         return f"❌ 예상치 못한 오류: {str(e)}"
-    finally:
-        # 임시 파일이 남아있다면 정리
-        try:
-            if 'temp_file_path' in locals():
-                os.unlink(temp_file_path)
-        except:
-            pass
 
 
 def post_mr_comment(body):
