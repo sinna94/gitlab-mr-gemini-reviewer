@@ -12,7 +12,36 @@ gitlab_api_url = os.environ.get('CI_API_V4_URL', 'https://gitlab.com/api/v4')
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 
 
+def get_latest_commit_changes():
+    """최신 커밋에서 변경된 파일들만 가져오기"""
+    # 최신 커밋 SHA 가져오기
+    commits_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/commits"
+    headers = {"PRIVATE-TOKEN": gitlab_token}
+
+    # MR의 source branch에서 최신 커밋 가져오기
+    mr_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}"
+    mr_resp = requests.get(mr_url, headers=headers)
+    mr_resp.raise_for_status()
+    mr_data = mr_resp.json()
+
+    source_branch = mr_data['source_branch']
+
+    # source branch의 최신 커밋 정보 가져오기
+    branch_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/branches/{source_branch}"
+    branch_resp = requests.get(branch_url, headers=headers)
+    branch_resp.raise_for_status()
+    latest_commit_sha = branch_resp.json()['commit']['id']
+
+    # 최신 커밋의 변경사항 가져오기
+    commit_diff_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/commits/{latest_commit_sha}/diff"
+    diff_resp = requests.get(commit_diff_url, headers=headers)
+    diff_resp.raise_for_status()
+
+    return diff_resp.json(), latest_commit_sha
+
+
 def get_mr_changes():
+    """MR 전체 변경사항 가져오기 (기존 방식)"""
     url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/changes"
     headers = {"PRIVATE-TOKEN": gitlab_token}
     
@@ -94,6 +123,28 @@ def post_mr_comment(body):
     return resp.json()
 
 
+def has_been_reviewed_before(commit_sha):
+    """이전에 리뷰했던 커밋인지 확인"""
+    # MR의 기존 노트들을 확인해서 해당 커밋이 이미 리뷰되었는지 체크
+    notes_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/notes"
+    headers = {"PRIVATE-TOKEN": gitlab_token}
+
+    try:
+        resp = requests.get(notes_url, headers=headers)
+        resp.raise_for_status()
+        notes = resp.json()
+
+        # 커밋 SHA가 포함된 리뷰 댓글이 있는지 확인
+        review_marker = f"<!-- REVIEWED_COMMIT:{commit_sha} -->"
+        for note in notes:
+            if review_marker in note.get('body', ''):
+                return True
+        return False
+    except:
+        # 에러 발생 시 안전하게 False 반환 (새로 리뷰)
+        return False
+
+
 def main():
     try:
         # 필수 환경변수 체크
@@ -116,9 +167,9 @@ def main():
 
         prompt_text = read_prompt(prompt_path)
 
-        # MR 변경사항 가져오기
+        # 최신 커밋의 변경사항만 가져오기
         try:
-            changes = get_mr_changes()
+            changes, latest_commit_sha = get_latest_commit_changes()
         except requests.exceptions.RequestException as e:
             print(f"GitLab API 호출 오류: {e}")
             sys.exit(1)
@@ -127,7 +178,13 @@ def main():
             print("리뷰할 변경사항이 없습니다.")
             return
 
-        print(f"📝 {len(changes)}개 파일에 대한 리뷰를 시작합니다...")
+        # 이미 리뷰한 커밋인지 확인
+        if has_been_reviewed_before(latest_commit_sha):
+            print(f"커밋 {latest_commit_sha[:8]}은 이미 리뷰되었습니다.")
+            print("새로운 커밋을 푸시하면 해당 변경사항만 리뷰됩니다.")
+            return
+
+        print(f"📝 커밋 {latest_commit_sha[:8]}의 {len(changes)}개 파일에 대한 리뷰를 시작합니다...")
 
         # 각 파일별로 리뷰 수행
         for i, change in enumerate(changes, 1):
@@ -140,7 +197,7 @@ def main():
 
             try:
                 review = review_with_gemini_cli(diff, prompt_text)
-                comment = f"### 🤖 Gemini 코드리뷰: `{filename}`\n\n{review}"
+                comment = f"<!-- REVIEWED_COMMIT:{latest_commit_sha} -->\n\n### 🤖 Gemini 코드리뷰: `{filename}` (커밋: {latest_commit_sha[:8]})\n\n{review}"
                 post_mr_comment(comment)
                 print(f"✅ {filename} 리뷰 완료")
 
