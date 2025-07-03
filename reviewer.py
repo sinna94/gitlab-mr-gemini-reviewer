@@ -29,11 +29,14 @@ def review_with_gemini(diff_text, prompt_text):
     # 프롬프트 파일에서 읽은 내용과 diff를 합쳐 전달
     prompt = f"{prompt_text}\n\n{diff_text}"
     result = subprocess.run(
-        ["gemini", "review", "--api-key", gemini_api_key],
-        input=prompt.encode(),
+        ["gemini", "generate", "--api-key", gemini_api_key, "--prompt", prompt],
         capture_output=True,
         check=True
     )
+
+    if result.returncode != 0:
+        raise Exception(f"Gemini CLI 오류: {result.stderr}")
+
     return result.stdout.decode()
 
 
