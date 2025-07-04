@@ -4,6 +4,7 @@ import sys
 import subprocess
 import tempfile
 import json
+import urllib.parse
 
 gitlab_token = os.environ.get('GITLAB_TOKEN')
 gitlab_project_id = os.environ.get('CI_PROJECT_ID')
@@ -27,7 +28,8 @@ def get_latest_commit_changes():
     source_branch = mr_data['source_branch']
 
     # source branch의 최신 커밋 정보 가져오기
-    branch_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/branches/{source_branch}"
+    encoded_branch = urllib.parse.quote(source_branch, safe='')
+    branch_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/branches/{encoded_branch}"
     branch_resp = requests.get(branch_url, headers=headers)
     branch_resp.raise_for_status()
     latest_commit_sha = branch_resp.json()['commit']['id']
