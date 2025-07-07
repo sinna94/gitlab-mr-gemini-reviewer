@@ -45,14 +45,127 @@ def get_latest_commit_changes():
     return diff_resp.json(), latest_commit_sha
 
 
-def get_mr_changes():
-    """MR 전체 변경사항 가져오기 (기존 방식)"""
-    url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/changes"
+def get_mr_changes_with_commits():
+    """MR 전체 변경사항과 커밋 정보를 함께 가져오기"""
+    # MR 정보 가져오기
+    mr_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}"
     headers = {"PRIVATE-TOKEN": gitlab_token}
-    
-    resp = requests.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.json()['changes']
+
+    mr_resp = requests.get(mr_url, headers=headers)
+    mr_resp.raise_for_status()
+    mr_data = mr_resp.json()
+
+    # MR의 모든 커밋 가져오기
+    commits_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/commits"
+    commits_resp = requests.get(commits_url, headers=headers)
+    commits_resp.raise_for_status()
+    commits = commits_resp.json()
+
+    # MR 전체 변경사항 가져오기
+    changes_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/changes"
+    changes_resp = requests.get(changes_url, headers=headers)
+    changes_resp.raise_for_status()
+    changes = changes_resp.json()['changes']
+
+    return {
+        'changes': changes,
+        'commits': commits,
+        'mr_info': mr_data,
+        'latest_commit_sha': commits[0]['id'] if commits else None
+    }
+
+def get_reviewed_commits():
+    """이미 리뷰된 커밋들 목록 가져오기"""
+    notes_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/notes"
+    headers = {"PRIVATE-TOKEN": gitlab_token}
+
+    try:
+        resp = requests.get(notes_url, headers=headers)
+        resp.raise_for_status()
+        notes = resp.json()
+
+        reviewed_commits = set()
+        for note in notes:
+            body = note.get('body', '')
+            # 리뷰 마커에서 커밋 SHA 추출
+            import re
+            matches = re.findall(r'<!-- REVIEWED_COMMIT:([a-f0-9]+) -->', body)
+            reviewed_commits.update(matches)
+
+        return reviewed_commits
+    except Exception as e:
+        print(f"기존 리뷰 확인 중 오류: {e}")
+        return set()
+
+def filter_new_changes(changes, commits, reviewed_commits):
+    """새로운 변경사항만 필터링"""
+    if not reviewed_commits:
+        return changes, commits
+
+    # 새로운 커밋들 찾기
+    new_commits = [commit for commit in commits if commit['id'] not in reviewed_commits]
+
+    if not new_commits:
+        return [], []
+
+    # 새로운 커밋들의 변경사항만 추출
+    new_changes = []
+    new_commit_shas = {commit['id'] for commit in new_commits}
+
+    # 각 새로운 커밋의 diff 가져오기
+    headers = {"PRIVATE-TOKEN": gitlab_token}
+
+    for commit in new_commits:
+        try:
+            commit_diff_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/repository/commits/{commit['id']}/diff"
+            diff_resp = requests.get(commit_diff_url, headers=headers)
+            diff_resp.raise_for_status()
+            commit_changes = diff_resp.json()
+
+            # 커밋 정보 추가
+            for change in commit_changes:
+                change['commit_sha'] = commit['id']
+                change['commit_message'] = commit['message']
+                change['commit_author'] = commit['author_name']
+
+            new_changes.extend(commit_changes)
+        except Exception as e:
+            print(f"커밋 {commit['id'][:8]} diff 가져오기 실패: {e}")
+            continue
+
+    return new_changes, new_commits
+
+def group_changes_by_commit(changes):
+    """커밋별로 변경사항 그룹핑"""
+    commit_groups = {}
+
+    for change in changes:
+        commit_sha = change.get('commit_sha', 'unknown')
+        if commit_sha not in commit_groups:
+            commit_groups[commit_sha] = {
+                'changes': [],
+                'commit_info': {
+                    'sha': commit_sha,
+                    'message': change.get('commit_message', ''),
+                    'author': change.get('commit_author', '')
+                }
+            }
+        commit_groups[commit_sha]['changes'].append(change)
+
+    return commit_groups
+
+def should_review_incrementally(mr_info, commits):
+    """점진적 리뷰를 할지 전체 리뷰를 할지 결정"""
+    # MR이 새로 생성되었거나 첫 리뷰인 경우 전체 리뷰
+    if mr_info.get('state') == 'opened' and len(commits) <= 3:
+        return False
+
+    # 커밋이 많은 경우 점진적 리뷰
+    if len(commits) > 5:
+        return True
+
+    # 기본적으로 점진적 리뷰
+    return True
 
 
 def read_prompt(prompt_path):
@@ -537,52 +650,83 @@ def main():
 
         prompt_text = read_prompt(prompt_path)
 
-        # 최신 커밋의 변경사항만 가져오기
+        # MR 정보와 변경사항 가져오기
         try:
-            changes, latest_commit_sha = get_latest_commit_changes()
+            mr_data = get_mr_changes_with_commits()
+            all_changes = mr_data['changes']
+            all_commits = mr_data['commits']
+            mr_info = mr_data['mr_info']
+            latest_commit_sha = mr_data['latest_commit_sha']
         except requests.exceptions.RequestException as e:
             print(f"GitLab API 호출 오류: {e}")
             sys.exit(1)
 
-        if not changes:
+        if not all_changes:
             print("리뷰할 변경사항이 없습니다.")
             return
 
-        # 이미 리뷰한 커밋인지 확인
-        if has_been_reviewed_before(latest_commit_sha):
-            print(f"커밋 {latest_commit_sha[:8]}은 이미 리뷰되었습니다.")
-            print("새로운 커밋을 푸시하면 해당 변경사항만 리뷰됩니다.")
-            return
+        # 이미 리뷰된 커밋들 확인
+        reviewed_commits = get_reviewed_commits()
 
-        # 고급 파일 그룹핑 사용
-        file_groups = advanced_group_related_files(changes)
+        # 점진적 리뷰 여부 결정
+        incremental_review = should_review_incrementally(mr_info, all_commits)
 
-        print(f"📝 커밋 {latest_commit_sha[:8]}의 {len(file_groups)}개 복합 그룹에 대한 리뷰를 시작합니다...")
+        if incremental_review and reviewed_commits:
+            print(f"점진적 리뷰 모드: 이미 리뷰된 커밋 {len(reviewed_commits)}개 제외")
+            changes, new_commits = filter_new_changes(all_changes, all_commits, reviewed_commits)
 
-        for i, group in enumerate(file_groups, 1):
-            group_type = group['type']
-            main_file = group['main_file']
-            files = group['files']
-            summary = group['summary']
+            if not changes:
+                print("새로운 변경사항이 없습니다. 모든 커밋이 이미 리뷰되었습니다.")
+                return
 
-            print(f"🔍 [{i}/{len(file_groups)}] 리뷰 중: {main_file} ({group_type})")
+            print(f"새로운 커밋 {len(new_commits)}개에 대해 리뷰를 진행합니다.")
 
-            # 모든 관련 파일의 diff를 합쳐서 컨텍스트 제공
-            combined_diff = ""
-            file_details = []
+            # 커밋별로 리뷰 진행
+            commit_groups = group_changes_by_commit(changes)
 
-            for file_change in files:
-                diff = file_change.get('diff')
-                if diff:
-                    filename = file_change.get('new_path') or file_change.get('old_path', 'unknown')
-                    file_details.append(filename)
-                    combined_diff += f"\n### 파일: {filename}\n{diff}\n"
+            for commit_sha, commit_group in commit_groups.items():
+                if commit_sha == 'unknown':
+                    continue
 
-            if not combined_diff:
-                continue
+                commit_changes = commit_group['changes']
+                commit_info = commit_group['commit_info']
 
-            # 그룹 컨텍스트 생성
-            context_info = f"""
+                print(f"\n📝 커밋 {commit_sha[:8]} 리뷰 시작")
+                print(f"   메시지: {commit_info['message'][:50]}...")
+                print(f"   작성자: {commit_info['author']}")
+
+                # 파일 그룹핑
+                file_groups = advanced_group_related_files(commit_changes)
+
+                for i, group in enumerate(file_groups, 1):
+                    group_type = group['type']
+                    main_file = group['main_file']
+                    files = group['files']
+                    summary = group['summary']
+
+                    print(f"   🔍 [{i}/{len(file_groups)}] 리뷰 중: {main_file} ({group_type})")
+
+                    # diff 결합
+                    combined_diff = ""
+                    file_details = []
+
+                    for file_change in files:
+                        diff = file_change.get('diff')
+                        if diff:
+                            filename = file_change.get('new_path') or file_change.get('old_path', 'unknown')
+                            file_details.append(filename)
+                            combined_diff += f"\n### 파일: {filename}\n{diff}\n"
+
+                    if not combined_diff:
+                        continue
+
+                    # 커밋 컨텍스트 추가
+                    context_info = f"""
+📋 **커밋 정보**:
+- 커밋 SHA: {commit_sha[:8]}
+- 커밋 메시지: {commit_info['message']}
+- 작성자: {commit_info['author']}
+
 📋 **파일 그룹 정보**:
 - 그룹 타입: {group_type}
 - 포함 파일: {', '.join(file_details)}
@@ -590,29 +734,92 @@ def main():
 
 📊 **파일별 상세**:
 """
-            for file_info in summary:
-                context_info += f"- `{file_info['path']}` ({file_info['type']})"
-                if file_info['classes']:
-                    context_info += f" - 클래스: {', '.join(file_info['classes'])}"
-                if file_info['functions']:
-                    context_info += f" - 함수: {', '.join(file_info['functions'][:3])}"
-                    if len(file_info['functions']) > 3:
-                        context_info += f" (+{len(file_info['functions'])-3}개 더)"
-                context_info += "\n"
+                    for file_info in summary:
+                        context_info += f"- `{file_info['path']}` ({file_info['type']})"
+                        if file_info['classes']:
+                            context_info += f" - 클래스: {', '.join(file_info['classes'])}"
+                        if file_info['functions']:
+                            context_info += f" - 함수: {', '.join(file_info['functions'][:3])}"
+                            if len(file_info['functions']) > 3:
+                                context_info += f" (+{len(file_info['functions'])-3}개 더)"
+                        context_info += "\n"
 
-            full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들은 서로 연관된 파일 그룹입니다. 종합적으로 검토해주세요."
+                    full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들은 서로 연관된 파일 그룹입니다. 종합적으로 검토해주세요."
 
-            try:
-                review = review_with_gemini_cli(combined_diff, full_prompt)
-                comment = f"<!-- REVIEWED_COMMIT:{latest_commit_sha} -->\n\n### 🤖 Gemini 복합 코드리뷰: {group_type.upper()} (커밋: {latest_commit_sha[:8]})\n\n{context_info}\n\n{review}"
-                post_mr_comment(comment)
-                print(f"✅ {main_file} 그룹 리뷰 완료")
+                    try:
+                        review = review_with_gemini_cli(combined_diff, full_prompt)
+                        comment = f"<!-- REVIEWED_COMMIT:{commit_sha} -->\n\n### 🤖 Gemini 점진적 코드리뷰: {group_type.upper()} (커밋: {commit_sha[:8]})\n\n{context_info}\n\n{review}"
+                        post_mr_comment(comment)
+                        print(f"   ✅ {main_file} 그룹 리뷰 완료")
 
-            except Exception as e:
-                print(f"❌ {main_file} 그룹 리뷰 실패: {e}")
-                continue
+                    except Exception as e:
+                        print(f"   ❌ {main_file} 그룹 리뷰 실패: {e}")
+                        continue
 
-        print("🎉 모든 복합 파일 그룹 리뷰가 완료되었습니다!")
+        else:
+            print("전체 리뷰 모드: MR의 모든 변경사항을 리뷰합니다.")
+
+            # 전체 파일 그룹핑
+            file_groups = advanced_group_related_files(all_changes)
+
+            print(f"📝 MR {gitlab_mr_iid}의 {len(file_groups)}개 복합 그룹에 대한 전체 리뷰를 시작합니다...")
+
+            for i, group in enumerate(file_groups, 1):
+                group_type = group['type']
+                main_file = group['main_file']
+                files = group['files']
+                summary = group['summary']
+
+                print(f"🔍 [{i}/{len(file_groups)}] 리뷰 중: {main_file} ({group_type})")
+
+                # diff 결합
+                combined_diff = ""
+                file_details = []
+
+                for file_change in files:
+                    diff = file_change.get('diff')
+                    if diff:
+                        filename = file_change.get('new_path') or file_change.get('old_path', 'unknown')
+                        file_details.append(filename)
+                        combined_diff += f"\n### 파일: {filename}\n{diff}\n"
+
+                if not combined_diff:
+                    continue
+
+                # 전체 리뷰 컨텍스트
+                context_info = f"""
+📋 **MR 전체 리뷰**:
+- MR 번호: {gitlab_mr_iid}
+- 전체 커밋 수: {len(all_commits)}
+- 그룹 타입: {group_type}
+- 포함 파일: {', '.join(file_details)}
+- 주요 언어: {group['language']}
+
+📊 **파일별 상세**:
+"""
+                for file_info in summary:
+                    context_info += f"- `{file_info['path']}` ({file_info['type']})"
+                    if file_info['classes']:
+                        context_info += f" - 클래스: {', '.join(file_info['classes'])}"
+                    if file_info['functions']:
+                        context_info += f" - 함수: {', '.join(file_info['functions'][:3])}"
+                        if len(file_info['functions']) > 3:
+                            context_info += f" (+{len(file_info['functions'])-3}개 더)"
+                    context_info += "\n"
+
+                full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들은 서로 연관된 파일 그룹입니다. 종합적으로 검토해주세요."
+
+                try:
+                    review = review_with_gemini_cli(combined_diff, full_prompt)
+                    comment = f"<!-- REVIEWED_COMMIT:{latest_commit_sha} -->\n\n### 🤖 Gemini 전체 코드리뷰: {group_type.upper()} (MR: {gitlab_mr_iid})\n\n{context_info}\n\n{review}"
+                    post_mr_comment(comment)
+                    print(f"✅ {main_file} 그룹 리뷰 완료")
+
+                except Exception as e:
+                    print(f"❌ {main_file} 그룹 리뷰 실패: {e}")
+                    continue
+
+        print("🎉 모든 코드 리뷰가 완료되었습니다!")
 
     except KeyboardInterrupt:
         print("\n⏹️ 사용자에 의해 중단되었습니다.")
