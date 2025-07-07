@@ -185,6 +185,61 @@ def advanced_group_related_files(changes):
 
     return groups
 
+def detect_language(file_path):
+    """파일 확장자로 언어 감지"""
+    if file_path.endswith('.java'):
+        return 'java'
+    elif file_path.endswith('.kt'):
+        return 'kotlin'
+    elif file_path.endswith('.py'):
+        return 'python'
+    elif file_path.endswith('.go'):
+        return 'go'
+    elif file_path.endswith(('.ts', '.tsx')):
+        return 'typescript'
+    elif file_path.endswith(('.js', '.jsx')):
+        return 'javascript'
+    elif file_path.endswith('.cs'):
+        return 'csharp'
+    elif file_path.endswith('.rb'):
+        return 'ruby'
+    elif file_path.endswith('.php'):
+        return 'php'
+    elif file_path.endswith(('.cpp', '.cc', '.cxx')):
+        return 'cpp'
+    elif file_path.endswith('.c'):
+        return 'c'
+    elif file_path.endswith('.rs'):
+        return 'rust'
+    elif file_path.endswith('.swift'):
+        return 'swift'
+    elif file_path.endswith('.scala'):
+        return 'scala'
+    else:
+        return 'unknown'
+
+def is_test_file(file_path):
+    """테스트 파일인지 확인"""
+    path_lower = file_path.lower()
+
+    # 테스트 디렉토리 패턴
+    test_dirs = ['test/', 'tests/', '__test__/', '__tests__/', 'spec/', 'specs/']
+    for test_dir in test_dirs:
+        if test_dir in path_lower:
+            return True
+
+    # 테스트 파일명 패턴
+    test_patterns = [
+        'test', 'tests', 'spec', 'specs', '_test', '_tests',
+        '.test.', '.spec.', 'test_', 'spec_'
+    ]
+
+    for pattern in test_patterns:
+        if pattern in path_lower:
+            return True
+
+    return False
+
 def analyze_file(change, file_path):
     """파일 분석 - 타입, 의존성, 용도 등"""
     analysis = {
