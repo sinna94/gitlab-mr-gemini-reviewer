@@ -747,10 +747,18 @@ def main():
                     full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들은 서로 연관된 파일 그룹입니다. 종합적으로 검토해주세요."
 
                     try:
-                        review = review_with_gemini_cli(combined_diff, full_prompt)
-                        comment = f"<!-- REVIEWED_COMMIT:{commit_sha} -->\n\n### 🤖 Gemini 점진적 코드리뷰: {group_type.upper()} (커밋: {commit_sha[:8]})\n\n{context_info}\n\n{review}"
-                        post_mr_comment(comment)
-                        print(f"   ✅ {main_file} 그룹 리뷰 완료")
+                        success = post_combined_review(
+                            combined_diff,
+                            context_info,
+                            prompt_text,
+                            commit_sha,
+                            group_type,
+                            main_file
+                        )
+                        if success:
+                            print(f"   ✅ {main_file} 그룹 리뷰 완료")
+                        else:
+                            print(f"   ❌ {main_file} 그룹 리뷰 실패")
 
                     except Exception as e:
                         print(f"   ❌ {main_file} 그룹 리뷰 실패: {e}")
@@ -807,13 +815,19 @@ def main():
                             context_info += f" (+{len(file_info['functions'])-3}개 더)"
                     context_info += "\n"
 
-                full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들은 서로 연관된 파일 그룹입니다. 종합적으로 검토해주세요."
-
                 try:
-                    review = review_with_gemini_cli(combined_diff, full_prompt)
-                    comment = f"<!-- REVIEWED_COMMIT:{latest_commit_sha} -->\n\n### 🤖 Gemini 전체 코드리뷰: {group_type.upper()} (MR: {gitlab_mr_iid})\n\n{context_info}\n\n{review}"
-                    post_mr_comment(comment)
-                    print(f"✅ {main_file} 그룹 리뷰 완료")
+                    success = post_combined_review(
+                        combined_diff,
+                        context_info,
+                        prompt_text,
+                        latest_commit_sha,
+                        group_type,
+                        main_file
+                    )
+                    if success:
+                        print(f"✅ {main_file} 그룹 리뷰 완료")
+                    else:
+                        print(f"❌ {main_file} 그룹 리뷰 실패")
 
                 except Exception as e:
                     print(f"❌ {main_file} 그룹 리뷰 실패: {e}")
@@ -827,6 +841,238 @@ def main():
     except Exception as e:
         print(f"💥 예상치 못한 오류 발생: {e}")
         sys.exit(1)
+
+
+def post_combined_review(combined_diff, context_info, prompt_text, commit_sha, group_type, main_file):
+    """Gemini CLI로 리뷰를 생성하고 인라인 댓글로 작성"""
+    try:
+        # Gemini로 리뷰 생성
+        full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들에 대해 구체적인 개선사항을 파일명과 라인번호를 포함하여 제안해주세요. 형식: 파일명:라인번호 - 개선사항"
+        review = review_with_gemini_cli(combined_diff, full_prompt)
+
+        # Gemini 리뷰에서 파일별 라인별 댓글 추출
+        inline_suggestions = parse_gemini_review_for_inline_comments(review, combined_diff)
+
+        # 인라인 댓글 작성
+        inline_count = 0
+
+        for suggestion in inline_suggestions:
+            try:
+                post_inline_comment(
+                    suggestion['file'],
+                    suggestion['line'],
+                    suggestion['message'],
+                    commit_sha
+                )
+                inline_count += 1
+            except Exception as e:
+                print(f"인라인 댓글 작성 실패: {e}")
+                continue
+
+        # 리뷰 완료 마커만 추가 (숨김 댓글)
+        marker_comment = f"<!-- REVIEWED_COMMIT:{commit_sha} -->"
+        post_mr_comment(marker_comment)
+
+        if inline_count > 0:
+            print(f"   📍 {inline_count}개의 인라인 댓글 추가 (Gemini)")
+        else:
+            print(f"   ✅ 특별한 개선사항 없음")
+
+        return True
+
+    except Exception as e:
+        print(f"리뷰 작성 실패: {e}")
+        return False
+
+
+def parse_gemini_review_for_inline_comments(review, combined_diff):
+    """Gemini 리뷰에서 파일별 라인별 댓글을 추출하여 인라인 댓글용 데이터로 변환"""
+    suggestions = []
+
+    # diff에서 파일별 라인 정보 미리 추출
+    line_info = parse_diff_for_line_info(combined_diff)
+    file_lines = {}
+    for info in line_info:
+        if info['file'] not in file_lines:
+            file_lines[info['file']] = []
+        file_lines[info['file']].append(info)
+
+    lines = review.split('\n')
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # 파일명:라인번호 형태 패턴 찾기
+        file_line_pattern = r'([^:]+):(\d+)\s*[-–]\s*(.+)'
+        match = re.match(file_line_pattern, line)
+
+        if match:
+            file_path = match.group(1).strip()
+            try:
+                line_number = int(match.group(2))
+                message = match.group(3).strip()
+
+                # 파일 경로 정규화 (diff에서 추출한 파일명과 매칭)
+                normalized_file = normalize_file_path(file_path, file_lines.keys())
+
+                if normalized_file and message:
+                    suggestions.append({
+                        'file': normalized_file,
+                        'line': line_number,
+                        'message': f"🤖 **Gemini 제안**: {message}"
+                    })
+            except ValueError:
+                continue
+
+        # 다른 패턴들도 시도
+        # "파일명의 라인 X에서..." 형태
+        alt_pattern = r'([^의]+)의?\s*라인\s*(\d+)에서?\s*[:-]?\s*(.+)'
+        alt_match = re.search(alt_pattern, line)
+
+        if alt_match:
+            file_path = alt_match.group(1).strip()
+            try:
+                line_number = int(alt_match.group(2))
+                message = alt_match.group(3).strip()
+
+                normalized_file = normalize_file_path(file_path, file_lines.keys())
+
+                if normalized_file and message:
+                    suggestions.append({
+                        'file': normalized_file,
+                        'line': line_number,
+                        'message': f"🤖 **Gemini 제안**: {message}"
+                    })
+            except ValueError:
+                continue
+
+    # 중복 제거
+    unique_suggestions = []
+    seen = set()
+    for suggestion in suggestions:
+        key = (suggestion['file'], suggestion['line'])
+        if key not in seen:
+            seen.add(key)
+            unique_suggestions.append(suggestion)
+
+    return unique_suggestions
+
+
+def normalize_file_path(gemini_file_path, actual_file_paths):
+    """Gemini가 언급한 파일 경로를 실제 diff의 파일 경로와 매칭"""
+    # 정확히 일치하는 경우
+    if gemini_file_path in actual_file_paths:
+        return gemini_file_path
+
+    # 파일명만 비교
+    gemini_basename = os.path.basename(gemini_file_path)
+    for actual_path in actual_file_paths:
+        if os.path.basename(actual_path) == gemini_basename:
+            return actual_path
+
+    # 부분 매칭
+    for actual_path in actual_file_paths:
+        if gemini_file_path in actual_path or actual_path in gemini_file_path:
+            return actual_path
+
+    return None
+
+
+def generate_smart_gemini_prompt(combined_diff, context_info):
+    """더 구체적인 인라인 댓글을 위한 Gemini 프롬프트 생성"""
+    return f"""다음 코드 변경사항을 리뷰하고, 구체적인 개선사항을 제안해주세요.
+
+{context_info}
+
+응답 형식을 다음과 같이 해주세요:
+- 각 개선사항은 "파일명:라인번호 - 개선사항 설명" 형태로 작성
+- 구체적이고 실행 가능한 제안만 포함
+- 코드 품질, 성능, 보안, 가독성 관점에서 검토
+- 불필요한 서론이나 결론 없이 개선사항만 나열
+
+예시:
+src/main.py:15 - 변수명 'data'를 더 구체적인 이름으로 변경하세요
+utils/helper.js:23 - 이 함수는 너무 길어서 여러 함수로 분리하는 것이 좋겠습니다
+
+코드 변경사항:
+{combined_diff}"""
+
+
+def post_inline_comment(file_path, line_number, comment_text, commit_sha):
+    """특정 파일의 라인에 인라인 댓글을 달기"""
+    url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/notes"
+    headers = {"PRIVATE-TOKEN": gitlab_token}
+
+    # GitLab API의 position 파라미터 구성
+    position = {
+        "base_sha": commit_sha,
+        "start_sha": commit_sha,
+        "head_sha": commit_sha,
+        "old_path": file_path,
+        "new_path": file_path,
+        "position_type": "text",
+        "new_line": line_number
+    }
+
+    data = {
+        "body": comment_text,
+        "position": json.dumps(position)
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, data=data)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"인라인 댓글 생성 실패 (파일: {file_path}, 라인: {line_number}): {e}")
+        # 인라인 댓글 실패 시 일반 댓글로 대체
+        fallback_comment = f"**파일: `{file_path}` (라인 {line_number})**\n\n{comment_text}"
+        return post_mr_comment(fallback_comment)
+
+
+def parse_diff_for_line_info(diff_content):
+    """diff 내용을 파싱하여 변경된 라인 정보를 추출"""
+    lines_info = []
+    current_file = None
+    new_line_num = 0
+
+    for line in diff_content.split('\n'):
+        if line.startswith('diff --git'):
+            # 파일명 추출
+            parts = line.split(' ')
+            if len(parts) >= 4:
+                current_file = parts[3][2:]  # "b/" 제거
+        elif line.startswith('@@'):
+            # 라인 번호 정보 추출 (예: @@ -1,4 +1,6 @@)
+            match = re.search(r'\+(\d+)', line)
+            if match:
+                new_line_num = int(match.group(1)) - 1
+        elif line.startswith('+') and not line.startswith('+++'):
+            # 추가된 라인
+            new_line_num += 1
+            if current_file:
+                lines_info.append({
+                    'file': current_file,
+                    'line': new_line_num,
+                    'type': 'added',
+                    'content': line[1:]  # '+' 제거
+                })
+        elif line.startswith('-') and not line.startswith('---'):
+            # 삭제된 라인 (라인 번호는 증가하지 않음)
+            if current_file:
+                lines_info.append({
+                    'file': current_file,
+                    'line': new_line_num,
+                    'type': 'removed',
+                    'content': line[1:]  # '-' 제거
+                })
+        elif not line.startswith('\\'):
+            # 변경되지 않은 라인
+            new_line_num += 1
+
+    return lines_info
 
 
 if __name__ == "__main__":
