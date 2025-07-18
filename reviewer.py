@@ -850,6 +850,9 @@ def post_combined_review(combined_diff, context_info, prompt_text, commit_sha, g
         full_prompt = f"{prompt_text}\n\n{context_info}\n\n위 파일들에 대해 구체적인 개선사항을 파일명과 라인번호를 포함하여 제안해주세요. 형식: 파일명:라인번호 - 개선사항"
         review = review_with_gemini_cli(combined_diff, full_prompt)
 
+        # 전체 리뷰 출력
+        print(f"\n🔍 Gemini 리뷰 결과 ({group_type}):\n{review}\n")
+
         # Gemini 리뷰에서 파일별 라인별 댓글 추출
         inline_suggestions = parse_gemini_review_for_inline_comments(review, combined_diff)
 
