@@ -8,7 +8,6 @@ import urllib.parse
 import re
 import ast
 from pathlib import Path
-import hashlib
 
 gitlab_token = os.environ.get('GITLAB_TOKEN')
 gitlab_project_id = os.environ.get('CI_PROJECT_ID')
@@ -630,17 +629,17 @@ def create_group_summary(related_files, file_analysis):
     return file_info
 
 def main():
-    global existing_inline_comments
-
-    if not all([gitlab_token, gitlab_project_id, gitlab_mr_iid, gemini_api_key]):
-        print("❌ 필수 환경 변수가 설정되지 않았습니다.")
-        sys.exit(1)
-
     try:
-        # 기존 인라인 댓글 정보 로드
-        print("🔍 기존 인라인 댓글 확인 중...")
-        existing_inline_comments = get_existing_inline_comments()
-        print(f"📝 기존 인라인 댓글 {len(existing_inline_comments)}개 발견")
+        # 필수 환경변수 체크
+        if not all([gitlab_token, gitlab_project_id, gitlab_mr_iid, gemini_api_key]):
+            missing_vars = []
+            if not gitlab_token: missing_vars.append("GITLAB_TOKEN")
+            if not gitlab_project_id: missing_vars.append("CI_PROJECT_ID")
+            if not gitlab_mr_iid: missing_vars.append("CI_MERGE_REQUEST_IID")
+            if not gemini_api_key: missing_vars.append("GEMINI_API_KEY")
+
+            print(f"필수 환경변수가 설정되지 않았습니다: {', '.join(missing_vars)}")
+            sys.exit(1)
 
         prompt_path = sys.argv[1] if len(sys.argv) > 1 else "prompt.txt"
 
@@ -862,19 +861,20 @@ def post_combined_review(combined_diff, context_info, prompt_text, commit_sha, g
 
         for suggestion in inline_suggestions:
             try:
-                result = post_inline_comment(
+                post_inline_comment(
                     suggestion['file'],
                     suggestion['line'],
                     suggestion['message'],
                     commit_sha
                 )
-                if result:  # None이 아니면 성공
-                    inline_count += 1
+                inline_count += 1
             except Exception as e:
                 print(f"인라인 댓글 작성 실패: {e}")
                 continue
 
-        # 마커 댓글 제거 - 더 이상 필요 없음
+        # 리뷰 완료 마커만 추가 (숨김 댓글)
+        marker_comment = f"<!-- REVIEWED_COMMIT:{commit_sha} -->"
+        post_mr_comment(marker_comment)
 
         if inline_count > 0:
             print(f"   📍 {inline_count}개의 인라인 댓글 추가 (Gemini)")
@@ -886,76 +886,6 @@ def post_combined_review(combined_diff, context_info, prompt_text, commit_sha, g
     except Exception as e:
         print(f"리뷰 작성 실패: {e}")
         return False
-
-
-def get_existing_inline_comments():
-    """기존 인라인 댓글의 위치 정보를 가져와서 중복 방지용 세트 생성"""
-    discussions_url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/discussions"
-    headers = {"PRIVATE-TOKEN": gitlab_token}
-
-    existing_comments = set()
-
-    try:
-        resp = requests.get(discussions_url, headers=headers)
-        resp.raise_for_status()
-        discussions = resp.json()
-
-        for discussion in discussions:
-            for note in discussion.get('notes', []):
-                position = note.get('position')
-                if position and position.get('new_path') and position.get('new_line'):
-                    # 파일 경로 + 라인 번호 + head_sha 조합으로 고유 키 생성
-                    key = f"{position['new_path']}:{position['new_line']}:{position.get('head_sha', '')}"
-                    existing_comments.add(key)
-
-    except Exception as e:
-        print(f"기존 댓글 확인 중 오류: {e}")
-
-    return existing_comments
-
-
-def post_inline_comment(file_path, line_number, comment_text, commit_sha):
-    """특정 파일의 라인에 인라인 댓글을 달기 (중복 검사 포함)"""
-    # 중복 검사를 위한 키 생성
-    comment_key = f"{file_path}:{line_number}:{commit_sha}"
-
-    # 기존 댓글과 중복되는지 확인
-    if comment_key in existing_inline_comments:
-        print(f"중복 댓글 건너뜀: {file_path}:{line_number}")
-        return None
-
-    url = f"{gitlab_api_url}/projects/{gitlab_project_id}/merge_requests/{gitlab_mr_iid}/discussions"
-    headers = {"PRIVATE-TOKEN": gitlab_token}
-
-    # GitLab API의 position 파라미터 구성
-    position = {
-        "base_sha": commit_sha,
-        "start_sha": commit_sha,
-        "head_sha": commit_sha,
-        "old_path": file_path,
-        "new_path": file_path,
-        "position_type": "text",
-        "new_line": line_number
-    }
-
-    data = {
-        "body": comment_text,
-        "position": position
-    }
-
-    try:
-        resp = requests.post(url, headers=headers, json=data)
-        resp.raise_for_status()
-
-        # 성공시 메모리의 기존 댓글 세트에 추가
-        existing_inline_comments.add(comment_key)
-
-        return resp.json()
-    except requests.exceptions.HTTPError as e:
-        print(f"인라인 댓글 생성 실패 (파일: {file_path}, 라인: {line_number}): {e}")
-        # 인라인 댓글 실패 시 일반 댓글로 대체
-        fallback_comment = f"**파일: `{file_path}` (라인 {line_number})**\n\n{comment_text}"
-        return post_mr_comment(fallback_comment)
 
 
 def parse_gemini_review_for_inline_comments(review, combined_diff):
